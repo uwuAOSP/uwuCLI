@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: The uwuAOSP Project
+# SPDX-License-Identifier: Apache-2.0
+set -euo pipefail
+
+module_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Override this to use an installed binary without invoking the Go toolchain.
+if [[ -n "${MEOW_BIN:-}" ]]; then
+    exec "$MEOW_BIN" "$@"
+fi
+go_bin="$(command -v go || true)"
+source_root="$(cd -- "$module_dir/../.." && pwd -P)"
+if [[ -z "$go_bin" && -x "$source_root/prebuilts/go/linux-x86/bin/go" ]]; then
+    go_bin="$source_root/prebuilts/go/linux-x86/bin/go"
+fi
+if [[ -z "$go_bin" ]]; then
+    echo 'meow: Go 1.24 or newer is required (or set MEOW_BIN)' >&2
+    exit 127
+fi
+# Go's build cache detects source and dependency changes. Execute the binary
+# itself so its exit status and Unix signals are not wrapped by `go run`.
+cache_root="${OUT_DIR:-$source_root/out}"
+if [[ "$cache_root" != /* ]]; then
+    cache_root="$source_root/$cache_root"
+fi
+mkdir -p -- "$cache_root/meow/bin"
+binary="$cache_root/meow/bin/meow"
+"$go_bin" -C "$module_dir" build -mod=readonly -buildvcs=false -trimpath -o "$binary" .
+exec "$binary" "$@"
