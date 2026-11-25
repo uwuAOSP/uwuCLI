@@ -31,7 +31,6 @@ type tickMsg time.Time
 type buildRunner struct {
 	top, out  string
 	env, args []string
-	plain     bool
 	logPath   string
 	rootPID   int
 	mu        sync.RWMutex
@@ -112,15 +111,9 @@ func (r *buildRunner) run(ctx context.Context, send func(any)) finishedMsg {
 		if err := os.MkdirAll(filepath.Join(r.out, "meow"), 0755); err != nil {
 			return err
 		}
-		lock, err := os.OpenFile(filepath.Join(r.out, "meow", ".lock"), os.O_CREATE|os.O_RDWR, 0600)
-		if err != nil {
-			return err
+		if r.logPath == "" {
+			r.logPath = filepath.Join(r.out, "meow", "build-"+started.Format("20060102-150405.000000000")+".log")
 		}
-		defer lock.Close()
-		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			return fmt.Errorf("another meow build is using %s", r.out)
-		}
-		r.logPath = filepath.Join(r.out, "meow", "build-"+started.Format("20060102-150405.000000000")+".log")
 		log, err := os.OpenFile(r.logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
 			return err
@@ -143,15 +136,12 @@ func (r *buildRunner) run(ctx context.Context, send func(any)) finishedMsg {
 		for _, setting := range executorSettings {
 			env = setEnv(env, setting.key, setting.value)
 		}
-		var server *statusServer
-		if !r.plain {
-			server, err = listenStatus(send)
-			if err != nil {
-				send(outputMsg{"meow: live status unavailable: " + err.Error()})
-			} else {
-				defer server.close()
-				env = setEnv(env, "MEOW_STATUS_SOCKET", server.path)
-			}
+		server, err := listenStatus(send)
+		if err != nil {
+			send(outputMsg{"meow: live status unavailable: " + err.Error()})
+		} else {
+			defer server.close()
+			env = setEnv(env, "MEOW_STATUS_SOCKET", server.path)
 		}
 		commandArgs := append([]string{"--make-mode"}, r.args...)
 		for _, setting := range executorSettings {
@@ -165,10 +155,6 @@ func (r *buildRunner) run(ctx context.Context, send func(any)) finishedMsg {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.WaitDelay = 2 * time.Second
 		writer := &capture{log: log, send: send}
-		if r.plain {
-			writer.log = io.MultiWriter(log, os.Stdout)
-			cmd.Stdin = os.Stdin
-		}
 		cmd.Stdout, cmd.Stderr = writer, writer
 		send(parallelismMsg(admission.state.jobs))
 		fmt.Fprintf(writer, "meow: Runa runtime admission enabled: initial=-j%d ceiling=-j%d\n", admission.state.jobs, admission.state.ceiling)

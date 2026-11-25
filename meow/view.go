@@ -208,9 +208,9 @@ func (m *dashboard) render() string {
 				}
 			}
 		}
-		footer := m.tr("↑↓ Select   Ctrl+A Logs   Ctrl+P Copy   Ctrl+C Stop", "↑↓ 选择   Ctrl+A 日志   Ctrl+P 复制   Ctrl+C 停止")
+		footer := m.tr("↑↓ Select   Ctrl+A Logs   Ctrl+P Copy   Ctrl+C Detach", "↑↓ 选择   Ctrl+A 日志   Ctrl+P 复制   Ctrl+C 退出查看")
 		if m.copying {
-			footer = m.tr("Copy mode   Ctrl+P Resume   Ctrl+C Stop", "复制模式   Ctrl+P 返回   Ctrl+C 停止")
+			footer = m.tr("Copy mode   Ctrl+P Resume   Ctrl+C Detach", "复制模式   Ctrl+P 返回   Ctrl+C 退出查看")
 		}
 		if m.stopping {
 			footer = m.tr("Stopping build…", "正在停止构建…")

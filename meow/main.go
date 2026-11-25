@@ -7,10 +7,9 @@ package main
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strconv"
 	"syscall"
@@ -23,7 +22,32 @@ import (
 func main() { os.Exit(mainExit()) }
 
 func mainExit() int {
-	o, err := parseOptions(os.Args[1:])
+	args := os.Args[1:]
+	if len(args) >= 3 && args[0] == guardMode {
+		ready := internalFile(3, "startup")
+		defer ready.Close()
+		if err := guardBuild(args[1], args[2], args[3:], ready); err != nil {
+			_ = json.NewEncoder(ready).Encode(startupReply{Error: err.Error()})
+			return 1
+		}
+		return 0
+	}
+	if len(args) >= 4 && args[0] == serviceMode {
+		r := &buildRunner{top: args[1], out: args[2], logPath: args[3], args: args[4:], env: os.Environ()}
+		if err := serveBuild(r, internalFile(3, "control"), internalFile(4, "result"), internalFile(5, "lock")); err != nil {
+			return 1
+		}
+		return 0
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	if len(args) > 0 {
+		switch args[0] {
+		case "status", "stop", "attach":
+			return controlBuild(ctx, args[0], args[1:])
+		}
+	}
+	o, err := parseOptions(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "meow:", err)
 		return 2
@@ -32,9 +56,7 @@ func mainExit() int {
 		fmt.Print(usage)
 		return 0
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	interactive := !o.plain && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd()) && os.Getenv("TERM") != "dumb" && os.Getenv("TERM") != ""
+	interactive := !o.plain && terminalAvailable()
 	if o.preview {
 		if !interactive {
 			fmt.Fprintln(os.Stderr, "meow: --preview requires an interactive terminal")
@@ -75,76 +97,25 @@ func mainExit() int {
 	}
 	env = setEnv(env, "TOP", top)
 	env = setEnv(env, "ORIGINAL_PWD", start)
-	runner := &buildRunner{top: top, out: outputRoot(top, env), env: env, args: append(append([]string(nil), o.args...), overrides...), plain: !interactive}
-	var result finishedMsg
-	if !interactive {
-		result = runner.run(ctx, func(any) {})
-	} else {
-		// Keep producer delivery cancellable even if terminal initialization fails.
-		delivery, closeDelivery := context.WithCancel(context.Background())
-		defer closeDelivery()
-		inbox := make(chan any, 128)
-		send := func(msg any) {
-			select {
-			case inbox <- msg:
-			case <-delivery.Done():
-			}
-		}
-		model := newDashboard(inbox, runner, stop)
-		model.deliveryDone = delivery.Done()
-		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithoutSignalHandler(), tea.WithFPS(30))
-		completed := make(chan finishedMsg, 1)
-		ready := make(chan struct{})
-		model.launch = func() tea.Msg { close(ready); return nil }
-		go func() {
-			select {
-			case <-ready:
-				result := runner.run(ctx, send)
-				completed <- result
-				send(result)
-			case <-delivery.Done():
-				completed <- finishedMsg{err: context.Canceled}
-			}
-		}()
-		go func() {
-			select {
-			case <-ctx.Done():
-				program.Send(stopMsg{})
-			case <-delivery.Done():
-			}
-		}()
-		_, uiErr := program.Run()
-		closeDelivery()
-		stop()
-		if uiErr != nil {
-			fmt.Fprintln(os.Stderr, "meow: dashboard:", uiErr)
-		}
-		result = <-completed
-		if uiErr != nil && result.err == nil {
-			result.err = uiErr
-		}
-		if result.err != nil {
-			for _, line := range model.tasks[model.active].logs {
-				fmt.Fprintln(os.Stderr, line)
-			}
-		}
+	runner := &buildRunner{top: top, out: outputRoot(top, env), env: env, args: append(append([]string(nil), o.args...), overrides...)}
+	session, err := startBuild(ctx, runner)
+	if err != nil {
+		return reportError(err)
 	}
-	if result.logPath != "" {
-		fmt.Println("meow: output log:", result.logPath)
+	if o.detach {
+		fmt.Println("meow: build started; output log:", session.Log)
+		return 0
 	}
-	if result.err != nil {
-		fmt.Fprintln(os.Stderr, "meow:", result.err)
-		if errors.Is(result.err, context.Canceled) {
-			return 130
-		}
-		var exit *exec.ExitError
-		if errors.As(result.err, &exit) && exit.ExitCode() > 0 {
-			return exit.ExitCode()
-		}
-		return 1
-	}
-	fmt.Printf("#### build completed successfully (%s) ####\n", elapsedText(result.elapsed))
-	return 0
+	return attachBuild(ctx, runner.out, session, interactive)
+}
+
+func terminalAvailable() bool {
+	return term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd()) && os.Getenv("TERM") != "dumb" && os.Getenv("TERM") != ""
+}
+
+func reportError(err error) int {
+	fmt.Fprintln(os.Stderr, "meow:", err)
+	return 1
 }
 
 func elapsedText(d time.Duration) string {

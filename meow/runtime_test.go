@@ -124,7 +124,7 @@ func TestRunnerDoesNotStartCanceledBuild(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	top := t.TempDir()
-	r := &buildRunner{top: top, out: filepath.Join(top, "out"), plain: true}
+	r := &buildRunner{top: top, out: filepath.Join(top, "out")}
 	result := r.run(ctx, func(any) {})
 	if !errors.Is(result.err, context.Canceled) {
 		t.Fatalf("canceled build: %v", result.err)

@@ -19,6 +19,7 @@ const giB int64 = 1 << 30
 type options struct {
 	args                 []string
 	preview, plain, help bool
+	detach               bool
 	memory               string
 	gc                   string
 }
@@ -27,13 +28,20 @@ const usage = `meow / mio — Android build dashboard
 
 Usage: meow [dashboard options] [Soong arguments / targets...]
        mio  [dashboard options] [Soong arguments / targets...]
+       meow status | stop | attach [--plain]
 
   --preview                 Preview the dashboard without building
   --plain                   Use ordinary output instead of the dashboard
+  --detach                  Start a build without attaching to it
   --analysis-memory=VALUE   auto (default), off, bytes, or e.g. 16GiB
   --analysis-gc=PERCENT     Soong analysis GC percentage (default 100)
   -h, --help                Show this help
   --                        Pass every remaining argument to Soong
+
+Builds keep running when the viewer exits or SSH disconnects.
+Ctrl+C detaches; use 'meow stop' to cancel the build. Control commands
+do not require lunch; keep the same OUT_DIR or OUT_DIR_COMMON_BASE if
+using a custom output. Use 'meow -- <target>' for a reserved target name.
 
 Builds always use Runa, including Soong bootstrap. Executor settings
 SOONG_NINJA, NO_ABFS and MEOW_NINJA_BIN cannot override this policy.
@@ -63,6 +71,8 @@ func parseOptions(args []string) (options, error) {
 			o.preview = true
 		case a == "--plain":
 			o.plain = true
+		case a == "--detach":
+			o.detach = true
 		case a == "--help" || a == "-h":
 			o.help = true
 		case a == "--analysis-memory" || a == "--analysis-gc":
@@ -165,7 +175,7 @@ func sourceRoot(start string, env []string) (string, error) {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", fmt.Errorf("run inside an Android source tree, after lunch")
+			return "", fmt.Errorf("run inside an Android source tree or set TOP")
 		}
 		dir = parent
 	}

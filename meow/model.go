@@ -46,13 +46,87 @@ type analysisStage struct {
 	done, total, summaryDone, summaryTotal int
 }
 
+type phaseSnapshot struct {
+	State       taskState
+	Start, End  time.Time
+	Done, Total int
+	ETA         time.Time
+	Logs        []string `json:",omitempty"`
+}
+
+type actionSnapshot struct {
+	Phase int
+	Text  string
+	Start time.Time
+}
+
+type stageSnapshot struct {
+	Text        string
+	Start       time.Time
+	Done, Total int
+}
+
+type buildSnapshot struct {
+	PID, Active, Jobs int
+	Stopping          bool
+	Tasks             [2]phaseSnapshot
+	Actions           []actionSnapshot `json:",omitempty"`
+	Stage             *stageSnapshot   `json:",omitempty"`
+	Description       string
+}
+
+type sessionEnded struct {
+	result buildResult
+	err    error
+}
+
+func (m *dashboard) snapshot(details bool) buildSnapshot {
+	s := buildSnapshot{Active: m.active, Jobs: m.jobs, Description: m.description}
+	for i, t := range m.tasks {
+		s.Tasks[i] = phaseSnapshot{State: t.state, Start: t.start, End: t.end, Done: t.done, Total: t.total, ETA: t.eta}
+		if details {
+			s.Tasks[i].Logs = append([]string(nil), t.logs...)
+		}
+	}
+	if m.stage != nil {
+		s.Stage = &stageSnapshot{Text: m.stageText(), Start: m.stage.start, Done: m.stage.summaryDone, Total: m.stage.summaryTotal}
+	}
+	if details {
+		for _, a := range m.actions {
+			s.Actions = append(s.Actions, actionSnapshot{Phase: a.phase, Text: a.text, Start: a.start})
+		}
+	}
+	return s
+}
+
+func (m *dashboard) applySnapshot(s buildSnapshot) {
+	if !m.received {
+		m.selected, m.received = s.Active, true
+	}
+	m.active, m.jobs, m.description, m.stopping = s.Active, s.Jobs, s.Description, s.Stopping
+	for i, t := range s.Tasks {
+		m.tasks[i] = task{state: t.State, start: t.Start, end: t.End, done: t.Done, total: t.Total, eta: t.ETA, logs: t.Logs}
+	}
+	m.stage = nil
+	if s.Stage != nil {
+		m.stage = &analysisStage{text: s.Stage.Text, start: s.Stage.Start, summaryDone: s.Stage.Done, summaryTotal: s.Stage.Total}
+	}
+	m.actions = m.actions[:0]
+	for _, a := range s.Actions {
+		m.actions = append(m.actions, action{phase: a.Phase, text: a.Text, start: a.Start})
+	}
+	m.runner.mu.Lock()
+	m.runner.rootPID = s.PID
+	m.runner.mu.Unlock()
+}
+
 type dashboard struct {
 	inbox                                 <-chan any
 	deliveryDone                          <-chan struct{}
 	runner                                *buildRunner
 	cancel                                context.CancelFunc
-	launch                                tea.Cmd
-	preview, stopping                     bool
+	ended                                 *sessionEnded
+	preview, stopping, received           bool
 	width, height, selected, active, jobs int
 	details, copying                      bool
 	scroll                                int
@@ -87,8 +161,8 @@ func newDashboard(inbox <-chan any, r *buildRunner, cancel context.CancelFunc) *
 
 func (m *dashboard) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.tick(), m.sample()}
-	if !m.preview && m.launch != nil {
-		cmds = append(cmds, m.launch, m.next())
+	if m.inbox != nil {
+		cmds = append(cmds, m.next())
 	}
 	return tea.Batch(cmds...)
 }
@@ -130,34 +204,17 @@ func (m *dashboard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.metrics = msg
 		return m, tea.Tick(time.Second, func(time.Time) tea.Msg { return sampleMetrics(m.runner.pid(), m.runner.out) })
-	case outputMsg:
-		for _, line := range msg {
-			m.output(line)
-		}
+	case buildSnapshot:
+		m.applySnapshot(msg)
 		return m, m.next()
-	case statusMsg:
-		m.status(msg)
-		return m, m.next()
-	case parallelismMsg:
-		m.jobs = int(msg)
-		return m, m.next()
-	case finishedMsg:
-		for i := range m.tasks {
-			if m.tasks[i].state == running {
-				m.tasks[i].end = time.Now()
-				if msg.err != nil {
-					m.tasks[i].state = failed
-				} else {
-					m.tasks[i].state = succeeded
-				}
-			}
-		}
+	case sessionEnded:
+		m.ended = &msg
 		return m, tea.Quit
 	case stopMsg:
 		return m, m.stop()
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c":
+		case "ctrl+c", "q":
 			return m, m.stop()
 		case "ctrl+a":
 			m.details = !m.details
@@ -204,11 +261,7 @@ func (m *dashboard) stop() tea.Cmd {
 	if m.cancel != nil {
 		m.cancel()
 	}
-	if m.preview {
-		return tea.Quit
-	}
-	m.stopping = true
-	return nil // The build owns exit; do not leave child processes behind.
+	return tea.Quit
 }
 func (m *dashboard) scrollBy(delta int) {
 	m.details = true
