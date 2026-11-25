@@ -16,13 +16,15 @@ import (
 
 // Wire format belongs to Soong. The dashboard has no scheduler dependency.
 type statusEvent struct {
-	Type                  string `json:"type"`
-	ID                    uint64 `json:"id"`
-	Description           string `json:"description"`
-	StartedUnixNano       int64  `json:"started_unix_nano"`
-	Total                 int    `json:"total"`
-	Completed             int    `json:"completed"`
-	EstimatedTimeUnixNano int64  `json:"estimated_time_unix_nano"`
+	Type                  string            `json:"type"`
+	ID                    uint64            `json:"id"`
+	Description           string            `json:"description"`
+	StartedUnixNano       int64             `json:"started_unix_nano"`
+	Total                 int               `json:"total"`
+	Completed             int               `json:"completed"`
+	EstimatedTimeUnixNano int64             `json:"estimated_time_unix_nano"`
+	BuildConfig           map[string]string `json:"build_config"`
+	Targets               []string          `json:"targets"`
 }
 
 type statusMsg struct {

@@ -157,6 +157,7 @@ func attachBuild(ctx context.Context, out string, s buildSession, interactive bo
 	defer detach()
 	inbox := make(chan any)
 	model := newDashboard(inbox, &buildRunner{out: out}, detach)
+	model.session = s
 	model.deliveryDone = ctx.Done()
 	program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithoutSignalHandler(), tea.WithFPS(30))
 	go func() {
@@ -196,7 +197,7 @@ func attachBuild(ctx context.Context, out string, s buildSession, interactive bo
 			return reportError(model.ended.err)
 		}
 		if model.ended.result.ExitCode != 0 {
-			for _, line := range model.tasks[model.active].logs {
+			for _, line := range model.logs {
 				fmt.Fprintln(os.Stderr, line)
 			}
 		}

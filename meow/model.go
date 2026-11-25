@@ -30,7 +30,6 @@ type task struct {
 	start, end  time.Time
 	done, total int
 	eta         time.Time
-	logs        []string
 }
 type actionKey struct{ connection, id uint64 }
 type action struct {
@@ -73,6 +72,10 @@ type buildSnapshot struct {
 	Actions           []actionSnapshot `json:",omitempty"`
 	Stage             *stageSnapshot   `json:",omitempty"`
 	Description       string
+	BuildConfig       map[string]string `json:",omitempty"`
+	Targets           []string          `json:",omitempty"`
+	Configured        bool
+	Logs              []string `json:",omitempty"`
 }
 
 type sessionEnded struct {
@@ -84,14 +87,13 @@ func (m *dashboard) snapshot(details bool) buildSnapshot {
 	s := buildSnapshot{Active: m.active, Jobs: m.jobs, Description: m.description}
 	for i, t := range m.tasks {
 		s.Tasks[i] = phaseSnapshot{State: t.state, Start: t.start, End: t.end, Done: t.done, Total: t.total, ETA: t.eta}
-		if details {
-			s.Tasks[i].Logs = append([]string(nil), t.logs...)
-		}
 	}
 	if m.stage != nil {
 		s.Stage = &stageSnapshot{Text: m.stageText(), Start: m.stage.start, Done: m.stage.summaryDone, Total: m.stage.summaryTotal}
 	}
 	if details {
+		s.Logs = append([]string(nil), m.logs...)
+		s.BuildConfig, s.Targets, s.Configured = m.buildConfig, m.targets, m.configured
 		for _, a := range m.actions {
 			s.Actions = append(s.Actions, actionSnapshot{Phase: a.phase, Text: a.text, Start: a.start})
 		}
@@ -100,12 +102,16 @@ func (m *dashboard) snapshot(details bool) buildSnapshot {
 }
 
 func (m *dashboard) applySnapshot(s buildSnapshot) {
-	if !m.received {
-		m.selected, m.received = s.Active, true
-	}
 	m.active, m.jobs, m.description, m.stopping = s.Active, s.Jobs, s.Description, s.Stopping
+	m.buildConfig, m.targets, m.configured = s.BuildConfig, s.Targets, s.Configured
+	m.logs = s.Logs
+	// Older running services still send logs grouped by phase.
+	if len(m.logs) == 0 {
+		m.logs = append(m.logs, s.Tasks[0].Logs...)
+		m.logs = append(m.logs, s.Tasks[1].Logs...)
+	}
 	for i, t := range s.Tasks {
-		m.tasks[i] = task{state: t.State, start: t.Start, end: t.End, done: t.Done, total: t.Total, eta: t.ETA, logs: t.Logs}
+		m.tasks[i] = task{state: t.State, start: t.Start, end: t.End, done: t.Done, total: t.Total, eta: t.ETA}
 	}
 	m.stage = nil
 	if s.Stage != nil {
@@ -121,26 +127,31 @@ func (m *dashboard) applySnapshot(s buildSnapshot) {
 }
 
 type dashboard struct {
-	inbox                                 <-chan any
-	deliveryDone                          <-chan struct{}
-	runner                                *buildRunner
-	cancel                                context.CancelFunc
-	ended                                 *sessionEnded
-	preview, stopping, received           bool
-	width, height, selected, active, jobs int
-	details, copying                      bool
-	scroll                                int
-	frozen                                string
-	now                                   time.Time
-	tasks                                 [2]task
-	connections                           map[uint64]int
-	actions                               []action
-	stage                                 *analysisStage
-	description                           string
-	metrics                               metricsMsg
-	cpuPercent                            float64
-	cpuKnown                              bool
-	chinese, color                        bool
+	inbox                       <-chan any
+	deliveryDone                <-chan struct{}
+	runner                      *buildRunner
+	cancel                      context.CancelFunc
+	ended                       *sessionEnded
+	preview, stopping           bool
+	width, height, active, jobs int
+	details, copying            bool
+	scroll                      int
+	frozen                      string
+	now                         time.Time
+	tasks                       [2]task
+	logs                        []string
+	connections                 map[uint64]int
+	actions                     []action
+	stage                       *analysisStage
+	description                 string
+	metrics                     metricsMsg
+	cpuPercent                  float64
+	cpuKnown                    bool
+	chinese, color, trueColor   bool
+	session                     buildSession
+	buildConfig                 map[string]string
+	targets                     []string
+	configured                  bool
 }
 
 func newDashboard(inbox <-chan any, r *buildRunner, cancel context.CancelFunc) *dashboard {
@@ -152,7 +163,9 @@ func newDashboard(inbox <-chan any, r *buildRunner, cancel context.CancelFunc) *
 		}
 	}
 	_, noColor := os.LookupEnv("NO_COLOR")
-	m.color = !noColor && os.Getenv("TERM") != "dumb"
+	m.color = !noColor && os.Getenv("UWU_NO_COLOR") != "true" && os.Getenv("TERM") != "dumb"
+	colorTerm := os.Getenv("COLORTERM")
+	m.trueColor = m.color && (colorTerm == "truecolor" || colorTerm == "24bit" || strings.Contains(os.Getenv("TERM"), "direct"))
 	if r != nil {
 		m.jobs = initialParallelism(r.args)
 	}
@@ -229,24 +242,25 @@ func (m *dashboard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.frozen = m.render()
 			return m, tea.Batch(tea.DisableMouse, tea.ShowCursor)
 		case "up", "k", "K":
-			m.selected = (m.selected + 1) % 2
-			m.scroll = 0
+			if m.details {
+				m.scrollBy(1)
+			}
 		case "down", "j", "J":
-			m.selected = (m.selected + 1) % 2
-			m.scroll = 0
+			if m.details {
+				m.scrollBy(-1)
+			}
 		case "pgup":
 			m.scrollBy(3)
 		case "pgdown":
 			m.scrollBy(-3)
 		case "home":
 			m.details = true
-			m.scroll = len(m.tasks[m.selected].logs)
+			m.scroll = len(m.logs)
 		case "end":
 			m.scroll = 0
 		}
 	case tea.MouseMsg:
 		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
-			m.selected = m.active
 			if msg.Button == tea.MouseButtonWheelUp {
 				m.scrollBy(3)
 			} else {
@@ -264,8 +278,11 @@ func (m *dashboard) stop() tea.Cmd {
 	return tea.Quit
 }
 func (m *dashboard) scrollBy(delta int) {
+	if !m.details && delta < 0 {
+		return
+	}
 	m.details = true
-	m.scroll = min(len(m.tasks[m.selected].logs), max(0, m.scroll+delta))
+	m.scroll = min(len(m.logs), max(0, m.scroll+delta))
 }
 
 func (m *dashboard) begin(phase int) {
@@ -290,6 +307,10 @@ func (m *dashboard) begin(phase int) {
 
 func (m *dashboard) status(msg statusMsg) {
 	e := msg.event
+	if e.Type == "build_config" {
+		m.buildConfig, m.targets, m.configured = e.BuildConfig, e.Targets, true
+		return
+	}
 	if e.Type == "phase" {
 		phase := 0
 		if e.Description == "main" {
@@ -405,11 +426,11 @@ func (m *dashboard) output(raw string) {
 		line = line[:4096]
 		line = strings.ToValidUTF8(line, "")
 	}
-	if len(t.logs) == 160 {
-		copy(t.logs, t.logs[1:])
-		t.logs[len(t.logs)-1] = line
+	if len(m.logs) == 160 {
+		copy(m.logs, m.logs[1:])
+		m.logs[len(m.logs)-1] = line
 	} else {
-		t.logs = append(t.logs, line)
+		m.logs = append(m.logs, line)
 	}
 	// Text progress is a fallback only. Structured totals count Ninja actions,
 	// whereas analysis counters count module variants and must stay separate.
@@ -427,8 +448,13 @@ func (m *dashboard) output(raw string) {
 }
 
 func (m *dashboard) seedPreview() {
+	m.buildConfig = map[string]string{
+		"PLATFORM_VERSION": "17", "UWU_VERSION": "17.0.182", "TARGET_PRODUCT": "uwu_astonc",
+		"TARGET_RELEASE": "cp2a", "TARGET_BUILD_VARIANT": "user", "TARGET_ARCH": "arm64", "soong_only": "true",
+	}
+	m.targets = []string{"Launcher3QuickStep", "Settings", "uwuSettingsExt", "systemextimage", "systemimage"}
+	m.configured = true
 	m.active = 1
-	m.selected = 1
 	m.jobs = 24
 	m.tasks[0] = task{state: succeeded, start: m.now.Add(-3 * time.Minute), end: m.now.Add(-2 * time.Minute), done: 1, total: 1}
 	m.tasks[1] = task{state: running, start: m.now.Add(-2 * time.Minute), done: 12640, total: 20030, eta: m.now.Add(312 * time.Second)}
@@ -437,5 +463,5 @@ func (m *dashboard) seedPreview() {
 	m.cpuPercent = 47
 	m.description = "//frameworks/base:framework-minus-apex"
 	m.actions = []action{{key: actionKey{1, 1}, phase: 1, text: "compile framework component", start: m.now.Add(-38 * time.Second)}}
-	m.tasks[1].logs = []string{"[ 63% 12640/20030 5m12s remaining] //frameworks/base:framework-minus-apex"}
+	m.logs = []string{"[ 63% 12640/20030 5m12s remaining] //frameworks/base:framework-minus-apex"}
 }

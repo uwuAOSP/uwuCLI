@@ -48,7 +48,7 @@ func TestDashboardGeometry(t *testing.T) {
 
 func TestDashboardPanelsAndInteractions(t *testing.T) {
 	m := fixtureDashboard()
-	for _, text := range []string{"[Task]", "Graph", "Main", "BUILD STATUS", "SYSTEM", "CPU 47%", "MEM 67%", "FREE", "SWAP", "DISK", "12640/20030", "compile framework component"} {
+	for _, text := range []string{"uwuAOSP", "uwu_astonc-cp2a-user", "17.0.182", "soong_only", "Launcher3QuickStep", "CPU 47%", "RAM 67%", "Swap", "Disk", "12640/20030", "compile framework component"} {
 		if !strings.Contains(m.View(), text) {
 			t.Errorf("missing %q", text)
 		}
@@ -66,6 +66,10 @@ func TestDashboardPanelsAndInteractions(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	if !m.details {
 		t.Fatal("logs not enabled")
+	}
+	m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	if view := m.View(); !strings.Contains(view, "CPU 47%") || !strings.Contains(view, "12640/20030") || strings.Contains(view, "[Main]") {
+		t.Fatal("scrolling logs must retain status and progress without phase tabs")
 	}
 }
 
@@ -115,7 +119,7 @@ func TestBoundedLogsAndControlSequences(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		m.output("line")
 	}
-	if len(m.tasks[1].logs) != 160 {
+	if len(m.logs) != 160 {
 		t.Fatal("unbounded history")
 	}
 	if got := cleanText("hello\x1b[2J\x1b]52;c;bad\a world\x1b[31m!"); got != "hello world!" {

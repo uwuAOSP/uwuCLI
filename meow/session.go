@@ -32,6 +32,7 @@ const (
 
 type buildSession struct {
 	Product, Log, Socket string
+	Release, Variant     string
 	Arguments            []string
 	Started              time.Time
 	GuardPID             int
@@ -159,6 +160,7 @@ func guardBuild(top, out string, args []string, ready *os.File) error {
 	}
 	s := buildSession{
 		Product: os.Getenv("TARGET_PRODUCT"), Arguments: arguments, Started: now, GuardPID: os.Getpid(),
+		Release: os.Getenv("TARGET_RELEASE"), Variant: os.Getenv("TARGET_BUILD_VARIANT"),
 		Log:    filepath.Join(out, "meow", "build-"+now.Format("20060102-150405.000000000")+".log"),
 		Socket: filepath.Join(dir, "control.sock"),
 	}

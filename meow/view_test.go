@@ -75,12 +75,13 @@ func TestRowRestoresBackgroundAfterNestedStyles(t *testing.T) {
 func TestStartupMessageKeepsActionPaneBackground(t *testing.T) {
 	m := newDashboard(nil, nil, nil)
 	m.color = true
+	m.trueColor = true
 	rows := strings.Split(m.View(), "\n")
 	startupRow := m.height - m.height/3 + (m.height/3)/2
 	if !strings.Contains(rows[startupRow], "Starting meow...") {
 		t.Fatal("startup message missing")
 	}
 	requireBackground(t, rows[startupRow], actionBG)
-	requireBackground(t, rows[0], canvas)
-	requireBackground(t, rows[1], selectedBG)
+	requireBackground(t, rows[0], overviewBG)
+	requireBackground(t, rows[1], overviewBG)
 }

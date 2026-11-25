@@ -8,7 +8,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"math"
 	"strings"
 	"time"
 
@@ -19,11 +18,11 @@ import (
 
 const (
 	blue       = "#76B1FF"
-	pink       = "#FF84C4"
-	canvas     = "#0E1323"
-	buildBG    = "#172A3D"
-	panelBG    = "#2B1E35"
-	selectedBG = "#30223A"
+	resourceFG = "#83D8C6"
+	jobsFG     = "#C6B6F7"
+	overviewBG = "#101725"
+	overviewFG = "#DCE5F1"
+	mutedFG    = "#8996AC"
 	progressBG = "#232B46"
 	actionBG   = "#141C30"
 )
@@ -31,6 +30,7 @@ const (
 type painter struct {
 	renderer *lipgloss.Renderer
 	color    bool
+	surface  bool
 }
 
 func newPainter(color bool) painter {
@@ -40,7 +40,7 @@ func newPainter(color bool) painter {
 	} else {
 		r.SetColorProfile(termenv.Ascii)
 	}
-	return painter{r, color}
+	return painter{renderer: r, color: color}
 }
 func (p painter) text(s, fg string, bold bool) string {
 	style := p.renderer.NewStyle().Bold(bold)
@@ -56,7 +56,7 @@ func fit(s string, width int) string {
 }
 func (p painter) row(s, bg string, width int) string {
 	s = fit(s, width)
-	if !p.color {
+	if !p.color || bg == "" {
 		return s
 	}
 	// Lip Gloss wraps nested ANSI text without restoring its outer style after
@@ -76,12 +76,6 @@ func (m *dashboard) tr(en, zh string) string {
 	}
 	return en
 }
-func (m *dashboard) taskLabel(i int) string {
-	if i == 0 {
-		return m.tr("Graph", "构建图")
-	}
-	return m.tr("Main", "主构建")
-}
 func (m *dashboard) View() string {
 	if m.copying && m.frozen != "" {
 		return m.frozen
@@ -89,8 +83,171 @@ func (m *dashboard) View() string {
 	return m.render()
 }
 
+func (m *dashboard) brand(p painter) string {
+	const wordmark = "uwuAOSP"
+	if !p.color {
+		return wordmark
+	}
+	if !m.trueColor {
+		return "\x1b[1;36m" + wordmark + "\x1b[0m"
+	}
+	// Match the per-letter palette in uwu's banner.
+	colors := [...]string{"#8DE3FD", "#92D8FC", "#97CEFB", "#9BC3FB", "#A6CBFC", "#B1D3FC", "#BCDBFD"}
+	var b strings.Builder
+	for i := range wordmark {
+		b.WriteString(p.text(wordmark[i:i+1], colors[i], true))
+	}
+	return b.String()
+}
+
+func (p painter) dim(s string) string {
+	if p.surface {
+		return p.text(s, mutedFG, false)
+	}
+	if p.color {
+		return p.renderer.NewStyle().Faint(true).Render(s)
+	}
+	return s
+}
+
+func (p painter) value(s string) string {
+	if p.surface {
+		return p.text(s, overviewFG, false)
+	}
+	return s
+}
+
+func (m *dashboard) summaryRows(p painter, width, height int) []string {
+	resources := m.resourceRows(p)
+	resources = resources[:min(len(resources), max(0, height-2))]
+	headerHeight := height - len(resources)
+	rows := []string{"", "  " + m.brand(p)}
+	if height >= 10 {
+		rows = append(rows, "")
+	}
+	value := func(key, fallback string) string {
+		if v := m.buildConfig[key]; v != "" {
+			return strings.TrimSpace(cleanText(v))
+		}
+		return strings.TrimSpace(cleanText(fallback))
+	}
+	product := value("TARGET_PRODUCT", m.session.Product)
+	release := value("TARGET_RELEASE", m.session.Release)
+	variant := value("TARGET_BUILD_VARIANT", m.session.Variant)
+	android := value("PLATFORM_VERSION", "")
+	if android != "" && release != "" {
+		android += " (" + release + ")"
+	}
+	lunch := ""
+	if product != "" && release != "" && variant != "" {
+		lunch = strings.Join([]string{product, release, variant}, "-")
+	}
+	const indent = 12
+	field := func(label, value string) string {
+		if value == "" {
+			return ""
+		}
+		return p.dim(fit(label, indent)) + p.value(value)
+	}
+	pair := func(left, right string) {
+		switch {
+		case left == "" || right == "":
+			rows = append(rows, left+right)
+		case width < 72:
+			rows = append(rows, left, right)
+		default:
+			rows = append(rows, fit(left, 38)+right)
+		}
+	}
+	if android != "" || value("UWU_VERSION", "") != "" {
+		pair(field("android", android), field("release", value("UWU_VERSION", "")))
+	}
+	if product != "" || value("TARGET_ARCH", "") != "" {
+		pair(field("product", product), field("arch", value("TARGET_ARCH", "")))
+	}
+	if lunch != "" {
+		rows = append(rows, field("lunch", lunch))
+	}
+	pair(field("backend", "runa"), field("soong_only", value("soong_only", "")))
+
+	if m.configured {
+		targets := m.targets
+		if len(targets) == 0 {
+			targets = []string{m.tr("default", "默认")}
+		}
+		// Reserve room for at least the first target row on short terminals.
+		if headerHeight > 2 && len(rows) >= headerHeight {
+			rows = rows[:headerHeight-1]
+		}
+		prefix := p.dim(fit("targets", indent))
+		line := ""
+		for _, target := range targets {
+			target = strings.TrimSpace(cleanText(target))
+			if target == "" {
+				continue
+			}
+			next := strings.TrimSpace(line + " " + target)
+			if line != "" && ansi.StringWidth(next) > width-indent {
+				if len(rows) >= headerHeight-1 {
+					line = ansi.Truncate(line, max(0, width-indent-2), "…") + " …"
+					break
+				}
+				rows = append(rows, prefix+p.value(line))
+				prefix, next = strings.Repeat(" ", indent), target
+			}
+			line = next
+		}
+		if line != "" {
+			rows = append(rows, prefix+p.value(line))
+		}
+	}
+	rows = rows[:min(headerHeight, len(rows))]
+	if len(rows) < headerHeight && len(resources) > 0 {
+		rows = append(rows, "")
+	}
+	return append(rows, resources...)
+}
+
+func (m *dashboard) resourceRows(p painter) []string {
+	cpu, ram, swap := "—", "—", "—"
+	if m.cpuKnown {
+		cpu = fmt.Sprintf("%.0f%%", m.cpuPercent)
+	}
+	if m.metrics.memoryOK {
+		used := max(0, m.metrics.total-m.metrics.available)
+		if m.metrics.total > 0 {
+			ram = fmt.Sprintf("%.0f%% (%.1f / %.1f GiB)", 100*float64(used)/float64(m.metrics.total),
+				float64(used)/float64(giB), float64(m.metrics.total)/float64(giB))
+		}
+		swap = fmt.Sprintf("%.1f / %.1f GiB", float64(max(0, m.metrics.swapTotal-m.metrics.swapFree))/float64(giB),
+			float64(m.metrics.swapTotal)/float64(giB))
+	}
+	counts := m.metrics.counts
+	metric := func(label, value, accent string) string {
+		if accent == "" {
+			return p.dim(label) + " " + p.value(value)
+		}
+		return p.dim(label) + " " + p.text(value, accent, true)
+	}
+	compilerLabels := [...]string{"C++", "C", "Kotlin", "Java", "Rust", "R8"}
+	workers := []string{metric(m.tr("Jobs", "并发"), fmt.Sprint(m.jobs), jobsFG)}
+	for i, label := range compilerLabels {
+		workers = append(workers, metric(label, fmt.Sprint(counts[i]), ""))
+	}
+	return []string{
+		strings.Join([]string{metric("CPU", cpu, resourceFG), metric("RAM", ram, resourceFG),
+			metric("Swap", swap, ""), metric(m.tr("Disk", "磁盘"), memoryText(m.metrics.disk, m.metrics.diskOK), "")}, "    "),
+		workers[0] + "    " + strings.Join(workers[1:], "  "),
+	}
+}
+
 func (m *dashboard) render() string {
 	p := newPainter(m.color)
+	p.surface = m.color && m.trueColor
+	bodyBG := ""
+	if p.surface {
+		bodyBG = overviewBG
+	}
 	w := max(0, m.width-1) // Never occupy the terminal's wrap column.
 	contentWidth := max(0, m.width-3)
 	content := func(s string) string { return ansi.Truncate(s, contentWidth, "…") }
@@ -102,10 +259,7 @@ func (m *dashboard) render() string {
 	body := h - bottom
 	rows := make([]string, h)
 	for i := range rows {
-		bg := canvas
-		if i == m.selected+1 {
-			bg = selectedBG
-		}
+		bg := bodyBG
 		if i == body {
 			bg = progressBG
 		} else if i > body {
@@ -113,71 +267,26 @@ func (m *dashboard) render() string {
 		}
 		rows[i] = p.row("", bg, w)
 	}
-	if body > 0 {
-		rows[0] = p.row(p.text(m.tr("[Task]", "[任务]"), blue, true), canvas, w)
-	}
-	for i, t := range m.tasks {
-		if i+1 >= body {
-			break
-		}
-		marker := "  "
-		if i == m.selected {
-			marker = "→ "
-		}
-		label := m.taskLabel(i)
-		fg := ""
-		bold := t.state == running || t.state == failed
-		if t.state == running {
-			fg = blue
-		}
-		if t.state != running || i != m.active {
-			label = fit(label, 9) + " " + m.taskSummary(t)
-			if t.state == succeeded {
-				fg = "2"
-			}
-			if t.state == failed {
-				fg = "1"
-			}
-		}
-		decorate := func(s string) string {
-			if t.state == pending && m.color {
-				return p.renderer.NewStyle().Faint(true).Render(s)
-			}
-			return p.text(s, fg, bold)
-		}
-		line := decorate(marker + label)
-		if i == m.selected {
-			line = p.text(marker+m.taskLabel(i), pink, true) + decorate(strings.TrimPrefix(marker+label, marker+m.taskLabel(i)))
-		}
-		bg := canvas
-		if i == m.selected {
-			bg = selectedBG
-		}
-		rows[i+1] = p.row(content(line), bg, w)
-	}
-	left := w / 2
-	right := w - left
-	build := m.buildPanel(p, left)
-	system := m.systemPanel(p, right)
-	panelRows := max(len(build), len(system))
-	for i := 0; i < panelRows && i+3 < body; i++ {
-		l := p.row("", buildBG, left)
-		r := p.row("", canvas, right)
-		if i < len(build) {
-			l = build[i]
-		}
-		if i < len(system) {
-			r = system[i]
-		}
-		rows[i+3] = l + r
-	}
+	summaryHeight := body
 	if m.details {
-		start := 3 + panelRows
-		logs := m.tasks[m.selected].logs
-		end := max(0, len(logs)-min(m.scroll, len(logs)))
-		first := max(0, end-max(0, body-start))
-		for i, line := range logs[first:end] {
-			rows[start+i] = p.row(content(line), canvas, w)
+		summaryHeight -= min(4, max(0, body-3))
+	}
+	summary := m.summaryRows(p, contentWidth, summaryHeight)
+	for i, line := range summary {
+		rows[i] = p.row(content(line), bodyBG, w)
+	}
+	if m.details && len(summary) < body {
+		start := len(summary)
+		capacity := body - start
+		if capacity > 1 {
+			rows[start] = p.row(content(p.dim(m.tr("Logs", "日志"))), bodyBG, w)
+			start++
+			capacity--
+		}
+		end := max(min(len(m.logs), capacity), len(m.logs)-m.scroll)
+		first := max(0, end-capacity)
+		for i, line := range m.logs[first:end] {
+			rows[start+i] = p.row(content(p.value(line)), bodyBG, w)
 		}
 	}
 	if bottom > 0 {
@@ -204,11 +313,14 @@ func (m *dashboard) render() string {
 					row++
 				}
 				if row == body+1 && row < h-1 && m.description != "" {
-					rows[row] = p.row(content("   "+m.description), actionBG, w)
+					rows[row] = p.row(content("   "+p.value(m.description)), actionBG, w)
 				}
 			}
 		}
-		footer := m.tr("↑↓ Select   Ctrl+A Logs   Ctrl+P Copy   Ctrl+C Detach", "↑↓ 选择   Ctrl+A 日志   Ctrl+P 复制   Ctrl+C 退出查看")
+		footer := m.tr("Ctrl+A Logs   Ctrl+P Copy   Ctrl+C Detach", "Ctrl+A 日志   Ctrl+P 复制   Ctrl+C 退出查看")
+		if m.details {
+			footer = m.tr("↑↓ Scroll   Ctrl+A Hide logs   Ctrl+P Copy   Ctrl+C Detach", "↑↓ 滚动   Ctrl+A 隐藏日志   Ctrl+P 复制   Ctrl+C 退出查看")
+		}
 		if m.copying {
 			footer = m.tr("Copy mode   Ctrl+P Resume   Ctrl+C Detach", "复制模式   Ctrl+P 返回   Ctrl+C 退出查看")
 		}
@@ -249,62 +361,11 @@ func (m *dashboard) taskSummary(t task) string {
 		return fmt.Sprintf("%c %s  %s  %s=%d", spinner, m.tr("building", "编译中"), elapsedText(elapsed), m.tr("jobs", "并发"), m.jobs)
 	}
 }
-func (m *dashboard) buildPanel(p painter, w int) []string {
-	labels := []string{"C++", "C", "Kotlin", "Java", "Rust", "R8"}
-	lines := []string{p.row(p.text("  ◆ "+m.tr("BUILD STATUS", "构建情况"), pink, true), buildBG, w)}
-	for i := 0; i < 6; i += 2 {
-		entry := func(j int) string {
-			return p.text(fmt.Sprintf("%-8s", labels[j]), blue, true) + fmt.Sprintf(" %d", m.metrics.counts[j])
-		}
-		if w < 36 {
-			lines = append(lines, p.row("  "+entry(i), buildBG, w), p.row("  "+entry(i+1), buildBG, w))
-		} else {
-			lines = append(lines, p.row("  "+entry(i)+"    "+entry(i+1), buildBG, w))
-		}
-	}
-	return lines
-}
 func memoryText(n int64, known bool) string {
 	if !known {
 		return "—"
 	}
 	return fmt.Sprintf("%.1f GiB", float64(max(0, n))/float64(giB))
-}
-func usageBar(percent float64, known bool, w int) string {
-	w = max(0, w)
-	if !known {
-		return strings.Repeat("─", w)
-	}
-	n := min(w, max(0, int(math.Round(percent*float64(w)/100))))
-	return strings.Repeat("━", n) + strings.Repeat("─", w-n)
-}
-func (m *dashboard) systemPanel(p painter, w int) []string {
-	left := w / 2
-	right := w - left
-	card := func(s string, width int, bg, fg string, bold bool) string {
-		return p.row(p.text(" "+ansi.Truncate(s, max(0, width-2), "…"), fg, bold), bg, width)
-	}
-	percent := func(name string, n float64, known bool) string {
-		if !known {
-			return name + " —"
-		}
-		return fmt.Sprintf("%s %.0f%%", name, n)
-	}
-	mem := float64(0)
-	if m.metrics.total > 0 {
-		mem = 100 * float64(max(0, m.metrics.total-m.metrics.available)) / float64(m.metrics.total)
-	}
-	lines := []string{p.row(p.text("  ◆ "+m.tr("SYSTEM", "系统状态"), pink, true), panelBG, w),
-		card(percent("CPU", m.cpuPercent, m.cpuKnown), left, "#374A6B", blue, true) + card(percent("MEM", mem, m.metrics.memoryOK), right, "#53405E", pink, true),
-		card(usageBar(m.cpuPercent, m.cpuKnown, left-2), left, "#374A6B", blue, true) + card(usageBar(mem, m.metrics.memoryOK, right-2), right, "#53405E", pink, true)}
-	swap := "—"
-	if m.metrics.memoryOK {
-		swap = fmt.Sprintf("%.1f / %.1f GiB", float64(max(0, m.metrics.swapTotal-m.metrics.swapFree))/float64(giB), float64(m.metrics.swapTotal)/float64(giB))
-	}
-	for _, pair := range [][4]string{{"FREE", "JOBS", memoryText(m.metrics.available, m.metrics.memoryOK), fmt.Sprint(m.jobs)}, {"SWAP", "DISK", swap, memoryText(m.metrics.disk, m.metrics.diskOK)}} {
-		lines = append(lines, card(pair[0], left, "#2C2F36", blue, false)+card(pair[1], right, "#2C2F36", blue, false), card(pair[2], left, "#2C2F36", "#E6E8EE", true)+card(pair[3], right, "#2C2F36", "#E6E8EE", true))
-	}
-	return lines
 }
 func (m *dashboard) stageText() string {
 	text := m.stage.text
@@ -326,7 +387,7 @@ func (m *dashboard) progressLine() string {
 		if description != "" {
 			return description
 		}
-		return m.taskLabel(m.active) + " " + m.taskSummary(t)
+		return m.taskSummary(t)
 	}
 	text := fmt.Sprintf("[%3d%% %d/%d", t.done*100/t.total, t.done, t.total)
 	if !t.eta.IsZero() {
@@ -341,7 +402,7 @@ func (m *dashboard) progressLine() string {
 func (m *dashboard) actionLine(p painter, start time.Time, text string) string {
 	d := max(time.Duration(0), m.now.Sub(start))
 	s := int(d.Seconds())
-	return "   " + p.text(fmt.Sprintf("%2d:%02d ", s/60, s%60), timerColor(d), false) + text
+	return "   " + p.text(fmt.Sprintf("%2d:%02d ", s/60, s%60), timerColor(d), false) + p.value(text)
 }
 func timerColor(d time.Duration) string {
 	stops := []struct {
