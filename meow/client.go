@@ -159,6 +159,13 @@ func attachBuild(ctx context.Context, out string, s buildSession, interactive bo
 	model := newDashboard(inbox, &buildRunner{out: out}, detach)
 	model.session = s
 	model.deliveryDone = ctx.Done()
+	model.requestStop = func() tea.Msg {
+		snapshot, result, err := observeBuild(ctx, out, s, "stop")
+		if err == nil && snapshot == nil && result == nil {
+			err = fmt.Errorf("build control unavailable")
+		}
+		return stopReplyMsg{stopping: snapshot != nil, err: err}
+	}
 	program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithoutSignalHandler(), tea.WithFPS(30))
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)

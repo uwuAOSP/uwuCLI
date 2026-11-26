@@ -39,8 +39,9 @@ Usage: meow [dashboard options] [Soong arguments / targets...]
   --                        Pass every remaining argument to Soong
 
 Builds keep running when the viewer exits or SSH disconnects.
-Ctrl+C detaches; use 'meow stop' to cancel the build. Control commands
-do not require lunch; keep the same OUT_DIR or OUT_DIR_COMMON_BASE if
+Ctrl+C detaches. To cancel, press Ctrl+X and confirm in the dashboard,
+or run 'meow stop'. Control commands do not require lunch.
+Keep the same OUT_DIR or OUT_DIR_COMMON_BASE if
 using a custom output. Use 'meow -- <target>' for a reserved target name.
 
 Builds always use Runa, including Soong bootstrap. Executor settings

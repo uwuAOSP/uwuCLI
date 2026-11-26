@@ -16,6 +16,10 @@ import (
 )
 
 type stopMsg struct{}
+type stopReplyMsg struct {
+	stopping bool
+	err      error
+}
 type taskState uint8
 
 const (
@@ -102,7 +106,11 @@ func (m *dashboard) snapshot(details bool) buildSnapshot {
 }
 
 func (m *dashboard) applySnapshot(s buildSnapshot) {
-	m.active, m.jobs, m.description, m.stopping = s.Active, s.Jobs, s.Description, s.Stopping
+	m.active, m.jobs, m.description = s.Active, s.Jobs, s.Description
+	m.stopping = m.stopping || s.Stopping
+	if m.stopping {
+		m.confirmStop = false
+	}
 	m.buildConfig, m.targets, m.configured = s.BuildConfig, s.Targets, s.Configured
 	m.logs = s.Logs
 	// Older running services still send logs grouped by phase.
@@ -131,8 +139,11 @@ type dashboard struct {
 	deliveryDone                <-chan struct{}
 	runner                      *buildRunner
 	cancel                      context.CancelFunc
+	requestStop                 tea.Cmd
 	ended                       *sessionEnded
 	preview, stopping           bool
+	confirmStop, stopPending    bool
+	stopError                   string
 	width, height, active, jobs int
 	details, copying            bool
 	scroll                      int
@@ -225,10 +236,32 @@ func (m *dashboard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case stopMsg:
 		return m, m.stop()
+	case stopReplyMsg:
+		m.stopPending = false
+		m.stopping = m.stopping || msg.stopping
+		if msg.err != nil {
+			m.stopError = cleanText(msg.err.Error())
+		}
 	case tea.KeyMsg:
+		if m.confirmStop {
+			switch msg.String() {
+			case "y", "Y":
+				m.confirmStop, m.stopPending = false, true
+				return m, m.requestStop
+			case "q", "ctrl+c":
+				return m, m.stop()
+			case "n", "N", "esc":
+				m.confirmStop = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, m.stop()
+		case "ctrl+x":
+			if m.requestStop != nil && !m.copying && !m.stopPending && !m.stopping {
+				m.confirmStop, m.stopError = true, ""
+			}
 		case "ctrl+a":
 			m.details = !m.details
 			m.scroll = 0

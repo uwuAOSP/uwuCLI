@@ -317,15 +317,34 @@ func (m *dashboard) render() string {
 				}
 			}
 		}
-		footer := m.tr("Ctrl+A Logs   Ctrl+P Copy   Ctrl+C Detach", "Ctrl+A 日志   Ctrl+P 复制   Ctrl+C 退出查看")
+		footer := m.tr("Ctrl+A Logs   Ctrl+P Copy", "Ctrl+A 日志   Ctrl+P 复制")
 		if m.details {
-			footer = m.tr("↑↓ Scroll   Ctrl+A Hide logs   Ctrl+P Copy   Ctrl+C Detach", "↑↓ 滚动   Ctrl+A 隐藏日志   Ctrl+P 复制   Ctrl+C 退出查看")
+			footer = m.tr("↑↓ Scroll   Ctrl+A Hide logs   Ctrl+P Copy", "↑↓ 滚动   Ctrl+A 隐藏日志   Ctrl+P 复制")
 		}
-		if m.copying {
+		sessionKeys := m.tr("Ctrl+C Detach (build continues)", "Ctrl+C 退出查看（构建继续）")
+		compactKeys := m.tr("Ctrl+C Detach", "Ctrl+C 退出查看")
+		if m.preview || m.requestStop != nil {
+			sessionKeys = m.tr("Ctrl+X Stop build   ", "Ctrl+X 停止构建   ") + sessionKeys
+			compactKeys = m.tr("Ctrl+X Stop   ", "Ctrl+X 停止构建   ") + compactKeys
+		}
+		footer += "   " + sessionKeys
+		if ansi.StringWidth(footer) > contentWidth {
+			footer = sessionKeys
+			if ansi.StringWidth(footer) > contentWidth {
+				footer = compactKeys
+			}
+		}
+		switch {
+		case m.stopping:
+			footer = m.tr("Stopping build…   Ctrl+C Detach", "正在停止构建…   Ctrl+C 退出查看")
+		case m.stopPending:
+			footer = m.tr("Requesting stop…   Ctrl+C Detach", "正在请求停止…   Ctrl+C 退出查看")
+		case m.confirmStop:
+			footer = m.tr("Stop this build? [y/N]  Esc Cancel", "停止当前构建？[y/N]  Esc 取消")
+		case m.copying:
 			footer = m.tr("Copy mode   Ctrl+P Resume   Ctrl+C Detach", "复制模式   Ctrl+P 返回   Ctrl+C 退出查看")
-		}
-		if m.stopping {
-			footer = m.tr("Stopping build…", "正在停止构建…")
+		case m.stopError != "":
+			footer = m.tr("Ctrl+X Retry   Could not stop: ", "Ctrl+X 重试   无法停止构建：") + m.stopError
 		}
 		footer = content(footer)
 		if m.color {
